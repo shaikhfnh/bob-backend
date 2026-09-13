@@ -6,7 +6,7 @@ const { logAction } = require('../utils/auditLog');
 
 router.get('/', async (req, res) => {
   try {
-    const [rows] = await db.query('SELECT * FROM sessions WHERE status = "active" ORDER BY id');
+    const [rows] = await db.query("SELECT * FROM sessions WHERE status = 'active' ORDER BY id");
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
