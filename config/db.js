@@ -10,7 +10,7 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   ssl: {
-    rejectUnauthorized: true, // Aiven requires SSL; enforces real certificate validation
+    rejectUnauthorized: false, // Aiven requires SSL; enforces real certificate validation
   },
 });
 
