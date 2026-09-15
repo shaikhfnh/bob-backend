@@ -45,29 +45,42 @@ router.post('/', publicLimiter, async (req, res) => {
       return res.status(409).json({ error: 'You are already registered for this session.' });
     }
 
-    if (session.format === 'offline' && session.capacity) {
-      const [[{ count }]] = await db.query(
-        'SELECT COUNT(*) as count FROM registrants WHERE session_id = ?',
+   let registrationStatus = 'approved';
+
+if (session.format === 'offline' && session.capacity) {
+  const [[{ count }]] = await db.query(
+    "SELECT COUNT(*) as count FROM registrants WHERE session_id = ? AND status != 'waitlisted'",
+    [sessionId]
+  );
+
+  if (count >= session.capacity) {
+    if (session.waitlist_limit) {
+      const [[{ waitlistCount }]] = await db.query(
+        "SELECT COUNT(*) as waitlistCount FROM registrants WHERE session_id = ? AND status = 'waitlisted'",
         [sessionId]
       );
-      if (count >= session.capacity) {
-        return res.status(409).json({ error: 'This session is fully booked.' });
+      if (waitlistCount >= session.waitlist_limit) {
+        return res.status(409).json({ error: 'This session and its waitlist are both full.' });
       }
+      registrationStatus = 'waitlisted';
+    } else {
+      return res.status(409).json({ error: 'This session is fully booked.' });
     }
-
+  }
+}
     const [newUser] = await db.query(
       'INSERT INTO users (first_name, last_name, email, phone, consent) VALUES (?, ?, ?, ?, ?)',
       [cleanFirst, cleanLast, cleanEmail, phone, consent]
     );
     const userId = newUser.insertId;
 
-    const [result] = await db.query(
-      `INSERT INTO registrants (first_name, last_name, email, phone, civil_id, session_id, format, consent, user_id, ip_address, visitor_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [cleanFirst, cleanLast, cleanEmail, phone, civilId, sessionId, session.format, consent, userId, ip, visitorId || null]
-    );
+   const [result] = await db.query(
+  `INSERT INTO registrants (first_name, last_name, email, phone, civil_id, session_id, format, consent, user_id, ip_address, visitor_id, status)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  [cleanFirst, cleanLast, cleanEmail, phone, civilId, sessionId, session.format, consent, userId, ip, visitorId || null, registrationStatus]
+);
 
-    res.status(201).json({ success: true, id: result.insertId });
+res.status(201).json({ success: true, id: result.insertId, status: registrationStatus });
 
     sendConfirmationEmail({ to: cleanEmail, name: cleanFirst, sessionTitle: session.title })
       .catch((err) => console.error('Confirmation email failed:', err.message));
@@ -170,17 +183,34 @@ router.put('/:id', requireAuth, async (req, res) => {
 
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
-    const [rows] = await db.query('SELECT first_name, last_name, civil_id FROM registrants WHERE id = ?', [req.params.id]);
+    const [rows] = await db.query('SELECT first_name, last_name, civil_id, session_id, status FROM registrants WHERE id = ?', [req.params.id]);
+    const cancelled = rows[0];
+
     await db.query('DELETE FROM registrants WHERE id = ?', [req.params.id]);
+
+    // If a confirmed (non-waitlisted) spot just opened up, promote the
+    // longest-waiting person on that session's waitlist automatically.
+    if (cancelled && cancelled.status !== 'waitlisted') {
+      const [waitlisted] = await db.query(
+        "SELECT * FROM registrants WHERE session_id = ? AND status = 'waitlisted' ORDER BY created_at ASC LIMIT 1",
+        [cancelled.session_id]
+      );
+      if (waitlisted[0]) {
+        await db.query("UPDATE registrants SET status = 'approved' WHERE id = ?", [waitlisted[0].id]);
+        sendConfirmationEmail({
+          to: waitlisted[0].email,
+          name: waitlisted[0].first_name,
+          sessionTitle: 'your waitlisted session — a spot just opened up!',
+        }).catch((err) => console.error('Promotion email failed:', err.message));
+      }
+    }
 
     logAction({
       adminEmail: req.admin.email,
       action: 'cancel_booking',
       targetType: 'registrant',
       targetId: req.params.id,
-      targetName: rows[0] ? `${rows[0].first_name} ${rows[0].last_name} (${rows[0].civil_id})` : 'Unknown',
-      targetCivilId: rows[0]?.civil_id || null,
-      details: { name: rows[0] ? `${rows[0].first_name} ${rows[0].last_name}` : 'unknown' },
+      targetName: cancelled ? `${cancelled.first_name} ${cancelled.last_name} (${cancelled.civil_id})` : 'Unknown',
     });
 
     res.json({ success: true });
@@ -188,5 +218,3 @@ router.delete('/:id', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-module.exports = router;
